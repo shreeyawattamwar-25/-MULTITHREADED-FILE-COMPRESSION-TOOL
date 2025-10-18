@@ -1,0 +1,138 @@
+#include <iostream>
+#include <fstream>
+#include <thread>
+#include <chrono>
+#include <mutex> // Essential for thread safety
+#include <string>
+
+// --- Constants ---
+const int MAX_THREADS = 8; // Max size for our fixed-size results array
+
+// --- Shared Resources (Protected by Mutexes) ---
+// Global fixed-size array to store results (avoids std::vector)
+long long threadResults[MAX_THREADS] = {0}; 
+std::mutex array_mutex;  // Protects threadResults array
+std::mutex cout_mutex;   // Protects access to std::cout
+
+// --- Multithreaded Processing Function ---
+
+/**
+ * @brief Function executed by each thread to read a chunk and simulate work (e.g., compression).
+ */
+void processChunk(long long start, long long size, const std::string& inputPath, int threadIndex) {
+    if (size == 0) return;
+
+    std::ifstream inputFile(inputPath, std::ios::binary);
+    if (!inputFile.is_open()) {
+        std::lock_guard<std::mutex> lock(cout_mutex);
+        std::cerr << "Thread " << threadIndex << ": Error opening file.\n";
+        return;
+    }
+
+    // 1. Read the chunk data into a dynamically allocated buffer (no std::vector)
+    char* buffer = new char[size]; 
+    inputFile.seekg(start, std::ios::beg);
+    inputFile.read(buffer, size);
+    inputFile.close();
+
+    // 2. Simulate Work (Simple Byte Counting/Processing)
+    // This simulates the core compression logic performed by the thread.
+    long long byteCount = 0;
+    for (long long i = 0; i < size; ++i) {
+        // Simple operation to ensure the CPU does work on the data
+        if (buffer[i] != 0) { 
+            byteCount++;
+        }
+    }
+    
+    // 3. Store Result (Thread-Safe Operation)
+    {
+        // Lock ensures only one thread writes to this array index at a time.
+        std::lock_guard<std::mutex> lock(array_mutex);
+        threadResults[threadIndex] = byteCount;
+    }
+
+    delete[] buffer; // Manual memory cleanup is mandatory
+
+    std::lock_guard<std::mutex> lock(cout_mutex);
+    std::cout << "Thread " << threadIndex << " finished. Bytes processed: " << byteCount << "\n";
+}
+
+// --- Main Program ---
+
+int main(int argc, char* argv[]) {
+    // --- ARGUMENT CHECK (Fixes the error shown in the image) ---
+    if (argc != 2) {
+        std::cerr << "Usage: " << argv[0] << " <input_file_path>\n";
+        return 1;
+    }
+    const std::string inputPath = argv[1];
+    
+    // Determine the number of threads (capped at MAX_THREADS)
+    int numThreads = std::thread::hardware_concurrency();
+    if (numThreads > MAX_THREADS || numThreads == 0) {
+        numThreads = MAX_THREADS; 
+    }
+    std::cout << "Using " << numThreads << " threads for parallel processing.\n";
+
+    // 1. Determine File Size
+    std::ifstream inputFile(inputPath, std::ios::binary | std::ios::ate);
+    if (!inputFile.is_open()) {
+        std::cerr << "Error: Could not open input file: " << inputPath << "\n";
+        return 1;
+    }
+    long long totalSize = inputFile.tellg();
+    inputFile.close();
+
+    if (totalSize < 1) {
+        std::cout << "File is empty or too small.\n";
+        return 0;
+    }
+
+    // 2. Calculate Chunks and set up thread array (using dynamic array)
+    long long chunkSize = totalSize / numThreads;
+    std::thread* workers = new std::thread[numThreads];
+    
+    auto startTime = std::chrono::high_resolution_clock::now();
+
+    // 3. Launch Threads (Parallel Processing)
+    for (int i = 0; i < numThreads; ++i) {
+        long long start = i * chunkSize;
+        long long size = chunkSize;
+        
+        // Ensure the last thread takes any remaining bytes
+        if (i == numThreads - 1) {
+            size = totalSize - start;
+        }
+
+        // Launch the thread, passing the index to store the result
+        workers[i] = std::thread(processChunk, start, size, inputPath, i);
+    }
+
+    // 4. Wait for all threads to finish (Joining)
+    for (int i = 0; i < numThreads; ++i) {
+        if (workers[i].joinable()) {
+            workers[i].join();
+        }
+    }
+
+    // 5. Performance Measurement and Aggregate Results
+    auto endTime = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> duration = endTime - startTime;
+    
+    // Aggregate total count
+    long long finalCount = 0;
+    for (int i = 0; i < numThreads; ++i) {
+        finalCount += threadResults[i];
+    }
+
+    std::cout << "\n--- Performance Summary ---\n";
+    std::cout << "Total File Size: " << totalSize << " bytes\n";
+    std::cout << "Total Bytes Processed (Verification): " << finalCount << " bytes\n";
+    std::cout << "Time (Multithreaded): " << duration.count() << " ms\n";
+    
+    // IMPORTANT: Manual Cleanup of the dynamic thread array
+    delete[] workers;
+
+    return 0;
+}
